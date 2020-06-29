@@ -1,0 +1,893 @@
+/***************************************************************************
+ *   Copyright (C) 2007 by Daniel Iglesias   *
+ *   daniel@extremo   *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, write to the                         *
+ *   Free Software Foundation, Inc.,                                       *
+ *   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
+ ***************************************************************************/
+#include <vtkRenderer.h>
+#include <vtkTextProperty.h>
+#include <vtkCaptionActor2D.h>
+#include <vtkMapper.h>
+#include <vtkRenderWindow.h>
+
+#include <vtkSphereSource.h>
+#include <vtkActor.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkProperty.h>
+
+#include <vtkTextActor.h>
+#include <vtkTextProperty.h>
+#include <vtkLookupTable.h>
+#include <vtkScalarBarActor.h>
+
+#include <vtkWindowToImageFilter.h>
+#include <vtkJPEGWriter.h>
+
+#include <QString>
+#include <sstream>
+
+#include "vtkinterface.h"
+#include "compnode.h"
+#include "compmesh2D.h"
+#include "compmesh3D.h"
+#include "compmeshfree.h"
+#include "compmeshfree3D.h"
+#include "compradmap.h"
+
+double VTKInterface::palette[10][3] = 
+{ {1.0,0.3,0.3},
+  {0.3,1.0,0.3},
+  {0.3,0.3,1.0},
+  {0.5,0.3,0.3},
+  {0.3,0.5,0.3},
+  {0.3,0.3,0.5},
+  {0.2,0.3,0.3},
+  {0.3,0.2,0.3},
+  {0.3,0.3,0.2},
+  {0.5,0.5,1.0}
+};
+
+VTKInterface::VTKInterface()
+{
+}
+
+VTKInterface::VTKInterface(vtkRenderer* theRenderer_in)
+  : theRenderer(theRenderer_in)
+  , colorIndex(0)
+
+{
+  sphere = vtkSphereSource::New();
+  sphere->SetThetaResolution(20);
+  sphere->SetPhiResolution(15);
+//   sphere->SetRadius(0.00002); // slits
+//   sphere->SetRadius(0.5); // pendulum
+  sphere->SetRadius(0.5E-4); // pendulum
+
+  sphereMapper = vtkPolyDataMapper::New();
+  sphereMapper->SetInputConnection(sphere->GetOutputPort());
+
+  table = vtkLookupTable::New();
+  table->SetTableRange( 0.0, 0.0 );
+  table->SetNumberOfTableValues(100);
+  // Stress preferred:
+  table->SetHueRange( 0.667, 0.0 );
+  // Thermal preferred:
+//   table->SetHueRange( 0.0, 0.1 );
+//   table->SetValueRange( 0.2, 0.95 );
+  table->Build();
+
+  barActor = vtkScalarBarActor::New();
+  barActor->SetLookupTable(table);
+//   barActor->SetTitle("No results");
+  barActor->SetOrientationToVertical();
+  barActor->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();
+  barActor->GetPositionCoordinate()->SetValue(0.90,0.1);
+  barActor->SetWidth(0.07);
+  barActor->SetHeight(0.9);
+  barActor->SetNumberOfLabels(9);
+  barActor->GetLabelTextProperty()->BoldOff();
+  barActor->GetLabelTextProperty()->ShadowOff();
+  barActor->GetLabelTextProperty()->SetColor(0,0,0);
+  barActor->GetLabelTextProperty()->SetFontSize(35);
+  barActor->GetLabelTextProperty()->ItalicOff();
+
+  rec = false;
+}
+
+
+VTKInterface::~VTKInterface()
+{
+}
+
+void VTKInterface::readFile(const QString & file_name )
+{
+  input.open(file_name.toStdString().data());
+  char keyword[100];
+  char a; // For reading one-by-one the file.
+
+  while(input >> keyword) {
+
+    if(!strcmp(keyword,"//")) {
+      do {input.get(a);} while(a!='\n');
+    }
+
+//     else if(!strcmp(keyword,"TITLE")) {
+//       input >> theSimulation->title;
+//       output << "TITLE: " << theSimulation->title << std::endl;
+//     }
+
+    else if(!strcmp(keyword,"DIMENSION")) {
+      input >> dimension;
+    }
+
+    else if(!strcmp(keyword,"SYSTEM")) {
+      this->readSystem( );
+    }
+
+    else if(!strcmp(keyword,"ANALYSIS")) {
+      this->readAnalysis( );
+    }
+  }
+
+//   }
+//  theRenderer->SetBackground( 1, 1, 1); // white
+  theRenderer->ResetCamera();
+  theRenderer->ResetCameraClippingRange();
+//   Render the scene and start interaction.
+  theRenderer->GetRenderWindow()->Render();
+
+  this->setStep( 0 );
+}
+
+
+void VTKInterface::closeFile()
+{
+  std::map<int, CompNode>::iterator it_nodes;
+  std::vector<vtkActor*>::iterator it_spheres;
+  std::map<std::string, CompMesh2D>::iterator it_mesh2D;
+  std::map<std::string, CompMesh3D>::iterator it_mesh3D;
+  std::map<std::string, CompMeshfree>::iterator it_meshfree;
+  std::map<std::string, CompMeshfree3D>::iterator it_meshfree3D;
+  std::map<std::string, CompRadMap>::iterator it_radMap;
+
+  for( it_nodes = nodes.begin();
+      it_nodes!= nodes.end();
+      ++it_nodes )
+  {
+      it_nodes->second.removeFromRender(theRenderer);
+  }
+  for( it_spheres = spheres.begin();
+      it_spheres!= spheres.end();
+      ++it_spheres )
+  {
+      theRenderer->RemoveActor((*it_spheres));
+  }
+  for( it_mesh2D = mesh2D.begin();
+       it_mesh2D!= mesh2D.end();
+       ++it_mesh2D )
+  {
+    it_meshfree->second.removeFromRender(theRenderer);
+  }
+  for( it_meshfree = meshfree.begin();
+       it_meshfree!= meshfree.end();
+       ++it_meshfree )
+  {
+    it_meshfree->second.removeFromRender(theRenderer);
+  }
+  for( it_meshfree3D = meshfree3D.begin();
+      it_meshfree3D!= meshfree3D.end();
+      ++it_meshfree3D )
+    {
+      it_meshfree3D->second.removeFromRender(theRenderer);
+    }
+  for( it_radMap = environments.begin();
+      it_radMap!= environments.end();
+      ++it_radMap )
+  {
+    it_radMap->second.removeFromRender(theRenderer);
+  }
+  
+  nodes.clear();
+  spheres.clear();
+  timeConf.clear();
+  theRenderer->GetRenderWindow()->Render();
+  input.close();
+  spheres.clear();
+  resultsNames.clear();
+  environments.clear();
+}
+
+
+void VTKInterface::readSystem()
+{
+  char keyword[20];
+  while(input >> keyword) {
+    if(!strcmp(keyword,"ENDSYSTEM")) return;
+
+    else if(!strcmp(keyword,"NODES")) {
+      this->readNodes( );
+    }
+    else if(!strcmp(keyword,"RIGIDBODIES")) {
+      this->readRigidBodies( );
+    }
+    else if(!strcmp(keyword,"FLEXBODIES")) {
+      this->readFlexBodies( );
+    }
+//     else if(!strcmp(keyword,"CONSTRAINTS")) {
+//       this->readConstraints( system_in->subSystems[sysTitle] );
+//     }
+  }
+}
+
+
+void VTKInterface::readNodes()
+{
+  char keyword[20];
+  int num;
+  double x,y,z;
+  int counter=0;
+
+  while(input >> keyword) {
+    if(!strcmp(keyword,"ENDNODES")) return;
+
+    else{
+      num = atoi(keyword);
+      input >> x >> y >> z;
+      nodes[num] = *( new CompNode(num, x, y, z) );
+//       nodes[num].addToRender( this->theRenderer );
+      spheres.push_back( vtkActor::New() );
+      spheres[counter]->SetMapper(sphereMapper);
+      spheres[counter]->GetProperty()->SetColor(0.4235,0.6667,0.000);
+      spheres[counter]->GetProperty()->SetAmbient(0.3);
+      spheres[counter]->GetProperty()->SetDiffuse( (double)0.5 );
+      spheres[counter]->GetProperty()->SetSpecular(0.0);
+      spheres[counter]->GetProperty()->SetSpecularPower(5.0);
+      spheres[counter]->AddPosition(x, y, z);
+      theRenderer->AddActor(spheres[counter]);
+      ++counter;
+    }
+  }
+}
+
+
+void VTKInterface::readRigidBodies()
+{
+  char keyword[20];
+  std::string name;
+  int mat, nodeA, nodeB, nodeC, nodeD;
+
+  while(input >> keyword) {
+    if(!strcmp(keyword,"ENDRIGIDBODIES")) return;
+
+  }
+}
+
+
+void VTKInterface::readFlexBodies()
+{
+  char keyword[20];
+  std::string name;
+  int firstNode, lastNode;
+  std::vector<int> boundaryNodes;
+  std::vector<std::vector<int> > cells;
+
+  while(input >> keyword) {
+    if(!strcmp(keyword,"ENDFLEXBODIES")) return;
+
+    else if(!strcmp(keyword,"MESH")){
+      input >> name;
+
+      while(input >> keyword) { //read the node numbers
+        if(!strcmp(keyword,"ENDMESH")) break;
+
+        else if(!strcmp(keyword,"NODES")) {
+          input >> firstNode >> lastNode;
+        }
+        else if(!strcmp(keyword,"CELLS")) {
+          int cellsSize, n1, n2, n3;
+          cells.clear();
+          input >> cellsSize;
+          // Initialize boundary loop
+          for(int i=0; i< cellsSize; ++i){
+	    cells.push_back(std::vector<int>());
+            input >> n1 >> n2 >> n3;
+	    cells.back().push_back(n1);
+	    cells.back().push_back(n2);
+	    cells.back().push_back(n3);
+	    if(dimension==3){
+	      input >> n3;
+	      cells.back().push_back(n3);
+	    }
+          }
+        }
+      }
+      if(dimension==2){
+        mesh2D[name] = CompMesh2D();
+        mesh2D[name].initialize( nodes, firstNode, lastNode, cells, palette[colorIndex] );
+        mesh2D[name].updatePoints();
+        mesh2D[name].addToRender( this->theRenderer );
+        componentsNames.push_back("MESH2D.");
+        componentsNames.back().append(name.c_str());
+	colorIndex == 9 ? colorIndex=0 : colorIndex++;
+      }
+      else{
+        mesh3D[name] = CompMesh3D();
+        mesh3D[name].initialize( nodes, firstNode, lastNode, cells, palette[colorIndex]  );
+        mesh3D[name].updatePoints();
+        mesh3D[name].addToRender( this->theRenderer );
+        componentsNames.push_back("MESH3D.");
+        componentsNames.back().append(name.c_str());
+	colorIndex == 9 ? colorIndex=0 : colorIndex++;
+      }
+//       meshfree[name].updatePoints( );
+    }
+
+    else if(!strcmp(keyword,"MESHFREE")){
+      input >> name;
+
+      while(input >> keyword) { //read the node numbers
+        if(!strcmp(keyword,"ENDMESHFREE")) break;
+
+        else if(!strcmp(keyword,"NODES")) {
+          input >> firstNode >> lastNode;
+        }
+        else if(!strcmp(keyword,"BOUNDARY")) {
+          int boundarySize, nodeNumber;
+          boundaryNodes.clear();
+          input >> boundarySize;
+          // Initialize boundary loop
+          for(int i=0; i< boundarySize; ++i){
+            input >> nodeNumber;
+            boundaryNodes.push_back(nodeNumber);
+          }
+        }
+      }
+      if(dimension==2){
+        meshfree[name] = CompMeshfree();
+        meshfree[name].initialize( nodes, firstNode, lastNode, boundaryNodes );
+        meshfree[name].updatePoints();
+        meshfree[name].addToRender( this->theRenderer );
+        componentsNames.push_back("MESHFREE2D.");
+        componentsNames.back().append(name.c_str());
+
+      }
+      else{
+        meshfree3D[name] = CompMeshfree3D();
+        meshfree3D[name].initialize( nodes, firstNode, lastNode, boundaryNodes, palette[colorIndex]  );
+        meshfree3D[name].addToRender( this->theRenderer );
+        componentsNames.push_back("MESHFREE3D.");
+        componentsNames.back().append(name.c_str());
+	colorIndex == 9 ? colorIndex=0 : colorIndex++;
+      }
+//       meshfree[name].updatePoints( );
+
+    }
+  }
+}
+
+
+void VTKInterface::readAnalysis()
+{
+  std::string keyword;
+  int colorIndex(0);
+  std::string stringKeyword;
+  double time, qi;
+
+  while(input >> keyword) {
+    if(!strcmp(keyword.c_str(),"ENDANALYSIS")) return;
+    else if(!strcmp(keyword.c_str(),"FILE")){
+      input >> keyword; // read filename
+      std::ifstream input_analysis( keyword.c_str() ); // file to read analysis from
+      while(input_analysis >> keyword) {
+        time = atof(keyword.c_str());
+        int qSize = dimension*nodes.size();
+        for (int i = 0; i < qSize; ++i){
+          input_analysis >> qi;
+          timeConf[time].push_back(qi);
+        }
+        it_timeConf = timeConf.begin();
+      }
+    }
+    else if(!strcmp(keyword.c_str(),"STRESS")){
+      input >> stringKeyword;
+      if( mesh2D.find(stringKeyword) != mesh2D.end() ) {
+        mesh2D[stringKeyword].readResults( input, timeConf.size() );
+        resultsNames.push_back("sigma_x");
+        resultsNames.push_back("sigma_y");
+        resultsNames.push_back("sigma_xy");
+        resultsNames.push_back("sigma_VM");
+      }
+      else if( meshfree.find(stringKeyword) != meshfree.end() ) {
+        meshfree[stringKeyword].readResults( input, timeConf.size() );
+        resultsNames.push_back("sigma_x");
+        resultsNames.push_back("sigma_y");
+        resultsNames.push_back("sigma_xy");
+        resultsNames.push_back("sigma_VM");
+      }
+      else if( meshfree3D.find(stringKeyword) != meshfree3D.end() ) {
+        meshfree3D[stringKeyword].readResults( input, timeConf.size() );
+        resultsNames.push_back("sigma_x");
+        resultsNames.push_back("sigma_y");
+        resultsNames.push_back("sigma_z");
+        resultsNames.push_back("sigma_xy");
+        resultsNames.push_back("sigma_yz");
+        resultsNames.push_back("sigma_xz");
+        resultsNames.push_back("sigma_VM");
+      }
+      else
+        cerr << "ERROR: Body " << stringKeyword << " not found for STRESS reading" << endl;
+    }
+    else if(!strcmp(keyword.c_str(),"TEMPERATURE")){
+      input >> stringKeyword;
+      if( mesh2D.find(stringKeyword) != mesh2D.end() ) {
+	mesh2D[stringKeyword].readTemps( input, timeConf.size() );
+      }
+      else if( meshfree.find(stringKeyword) != meshfree.end() ) {
+	meshfree[stringKeyword].readTemps( input, timeConf.size() );
+      }
+      else if( meshfree3D.find(stringKeyword) != meshfree3D.end() ) {
+	meshfree3D[stringKeyword].readTemps( input, timeConf.size() );
+      }
+      resultsNames.push_back("temperatures");
+    }
+    else if(!strcmp(keyword.c_str(),"ENERGY")){
+      input >> stringKeyword; // name of components
+      if( mesh2D.find(stringKeyword) != mesh2D.end() ) {
+	mesh2D[stringKeyword].readEnergy( input, timeConf.size() ); // does nothing, read stuff is in graphwidget
+      }
+      else if( meshfree.find(stringKeyword) != meshfree.end() ) {
+	meshfree[stringKeyword].readEnergy( input, timeConf.size() ); // does nothing, read stuff is in graphwidget
+      }
+    }
+    else if(!strcmp(keyword.c_str(),"DOMAIN")){
+      input >> stringKeyword; // name of rigid body
+      int nodesNumber;
+    }
+    else if(!strcmp(keyword.c_str(),"BOUNDARY")){
+      input >> stringKeyword; // name of rigid body
+      int segmentsNumber;
+      input >> segmentsNumber; // segments-facets number
+//       if( rigid2Ds.find(stringKeyword) != rigid2Ds.end() ) {
+//         rigid2Ds[stringKeyword].removeFromRender( this->theRenderer );
+//
+//         input >> nodesNumber;
+//         rigid2Ds[stringKeyword].readDomain( input, timeConf.size(), nodesNumber, dimension );
+//         rigid2Ds[stringKeyword].addToRender( this->theRenderer );
+//       }
+      if( meshfree3D.find(stringKeyword) != meshfree3D.end() ) {
+        meshfree3D[stringKeyword].readBoundary( input, segmentsNumber );
+      }
+      else if( meshfree.find(stringKeyword) != meshfree.end() ) {
+        meshfree[stringKeyword].readBoundary( input, segmentsNumber );
+      }
+      else if( mesh2D.find(stringKeyword) != mesh2D.end() ) {
+        mesh2D[stringKeyword].readBoundary( input, segmentsNumber );
+      }
+    }
+    else if(!strcmp(keyword.c_str(),"RADIATION")){
+      environments[keyword] = CompRadMap();
+      environments[keyword].readResults( input );
+      environments[keyword].setLookUpTable(table);
+//      environments[keyword].addToRender( theRenderer );
+      environmentsNames.push_back(keyword.c_str());
+    }
+    else if(!strcmp(keyword.c_str(),"CONFIGURATION")){
+//           std::istringstream i(stringKeyword);
+      while(input >> stringKeyword){
+//           i >> time;
+	if(!strcmp(stringKeyword.c_str(),"ENDCONFIGURATION")) break;
+	time = atof(stringKeyword.c_str());
+  //      cout << keyword << ", ";
+	int qSize = dimension*nodes.size();
+	for (int i = 0; i < qSize; ++i){
+	  input >> qi;
+	  timeConf[time].push_back(qi);
+	}
+      }
+      cout << "STEPS read: " << timeConf.size() << endl;
+      it_timeConf = timeConf.begin();
+    }
+    else{ // Read the positions of formulation nodes along simulation time
+//       std::istringstream i(keyword);
+//       i >> time;
+// //      time = atof(keyword);
+// //      cout << keyword << ", ";
+//       int qSize = dimension*nodes.size();
+//       for (int i = 0; i < qSize; ++i){
+//         input >> qi;
+//         timeConf[time].push_back(qi);
+//       }
+//       it_timeConf = timeConf.begin();
+    }
+  }
+//  std::map<double, std::vector< double > >::iterator it_timeConf_temp;
+//  std::vector< double >::iterator it_vector;
+//  for(it_timeConf_temp = timeConf.begin();
+//      it_timeConf_temp != timeConf.end();
+//      ++it_timeConf_temp)
+//  {
+//    cout << endl << "Time = "<< it_timeConf_temp->first << endl;
+//    for(it_vector = it_timeConf_temp->second.begin();
+//        it_vector!= it_timeConf_temp->second.end();
+//        ++it_vector){
+//      cout << (*it_vector) << ", ";
+//    }
+//  }
+}
+
+
+vtkRenderer* VTKInterface::getRenderer()
+{
+  return this->theRenderer;
+}
+
+
+void VTKInterface::toggleContourBar(bool state)
+{
+  if ( !state ){
+    theRenderer->RemoveActor2D( barActor );
+//     cout << "Deactivating scale bar..." << endl;
+  }
+  if ( state ){
+    theRenderer->AddActor2D( barActor );
+//     cout << "Activating scale bar..." << endl;
+  }
+  theRenderer->GetRenderWindow()->Render();
+}
+
+void VTKInterface::viewContour( int index )
+{
+  std::map<std::string, CompMesh2D>::iterator itMesh2D;
+  std::map<std::string, CompMesh3D>::iterator itMesh3D;
+  std::map<std::string, CompMeshfree>::iterator itMeshfree;
+  std::map<std::string, CompMeshfree3D>::iterator itMeshfree3D;
+
+  table->SetTableRange( 0., 0.);
+
+  for( itMesh2D = mesh2D.begin();
+       itMesh2D!= mesh2D.end();
+       ++itMesh2D
+     )
+  {
+    itMesh2D->second.drawScalarField( index, getStep() );
+    itMesh2D->second.setLookUpTable( table );
+    refreshTable( &itMesh2D->second );
+  }
+
+  for( itMesh3D = mesh3D.begin();
+       itMesh3D!= mesh3D.end();
+       ++itMesh3D
+     )
+  {
+    itMesh3D->second.drawScalarField( index, getStep() );
+    itMesh3D->second.setLookUpTable( table );
+    refreshTable( &itMesh3D->second );
+  }
+
+  for( itMeshfree = meshfree.begin();
+       itMeshfree!= meshfree.end();
+       ++itMeshfree
+     )
+  {
+    itMeshfree->second.drawScalarField( index, getStep() );
+    itMeshfree->second.setLookUpTable( table );
+    refreshTable( &itMeshfree->second );
+  }
+
+  for( itMeshfree3D = meshfree3D.begin();
+       itMeshfree3D!= meshfree3D.end();
+       ++itMeshfree3D
+     )
+  {
+    itMeshfree3D->second.drawScalarField( index, getStep() );
+    itMeshfree3D->second.setLookUpTable( table );
+    refreshTable( &itMeshfree3D->second );
+  }
+  theRenderer->GetRenderWindow()->Render();
+
+}
+
+void VTKInterface::viewEnvironment( int index )
+{
+  int i=1;
+  std::map<std::string, CompRadMap>::iterator itEnvironment;
+
+  for( itEnvironment = environments.begin();
+      itEnvironment!= environments.end();
+      ++itEnvironment )
+  {
+    if( i==index )
+      itEnvironment->second.addToRender(theRenderer);
+    else
+      itEnvironment->second.removeFromRender(theRenderer);
+    ++i;
+  }
+  theRenderer->GetRenderWindow()->Render();
+
+}
+
+void VTKInterface::viewRec( bool state )
+{
+  rec = state;
+}
+
+void VTKInterface::stepForward( int steps )
+{
+  int i;
+
+  for( i=0; i<steps; ++i )
+  {
+    ++it_timeConf;
+    if(it_timeConf == timeConf.end()){
+      it_timeConf = timeConf.begin();
+    }
+  }
+  this->updateStep();
+}
+
+void VTKInterface::stepBack( int steps )
+{
+  int i;
+
+  for( i=0; i<steps; ++i )
+  {
+    if(it_timeConf == timeConf.begin()){
+      it_timeConf = timeConf.end();
+    }
+    --it_timeConf;
+  }
+  this->updateStep();
+}
+
+void VTKInterface::stepFirst( )
+{
+  it_timeConf = timeConf.begin();
+  this->updateStep();
+}
+
+void VTKInterface::setStep( int step )
+{
+//  cout << "timeConf.size() = "<< timeConf.size() << endl;
+  it_timeConf = timeConf.begin();
+  for( int i=0; i<step; ++i )
+    ++it_timeConf;
+  this->updateStep();
+
+  if(rec) stepRecord(step);
+}
+
+int VTKInterface::getStep( )
+{
+  std::map<double, std::vector< double > >::iterator itTimeTemp;
+  int counter=0;
+  for( itTimeTemp = timeConf.begin();
+       itTimeTemp!= it_timeConf;
+       ++itTimeTemp )
+    ++counter;
+  return counter;
+}
+
+void VTKInterface::updateStep( )
+{
+  std::map<int, CompNode>::iterator it_nodes;
+  std::vector<vtkActor*>::iterator it_spheres;
+  std::map<std::string, CompMesh2D>::iterator it_mesh2D;
+  std::map<std::string, CompMesh3D>::iterator it_mesh3D;
+  std::map<std::string, CompMeshfree>::iterator it_meshfree;
+  std::map<std::string, CompMeshfree3D>::iterator it_meshfree3D;
+  double zero=0.;
+
+  int i=0;
+
+  for( it_nodes = nodes.begin();
+      it_nodes!= nodes.end();
+      ++it_nodes )
+  {
+    if(dimension==3){
+      it_nodes->second.move(  it_timeConf->second[3*i],
+                              it_timeConf->second[3*i+1],
+                              it_timeConf->second[3*i+2]
+                            );
+    }
+    else if(dimension==2){
+      it_nodes->second.move(  it_timeConf->second[2*i],
+                              it_timeConf->second[2*i+1],
+                              zero
+                           );
+    }
+    ++i;
+  }
+  i=0;
+  for( it_spheres = spheres.begin();
+      it_spheres!= spheres.end();
+      ++it_spheres )
+  {
+    if(dimension==3){
+      (*it_spheres)->SetPosition( it_timeConf->second[3*i],
+                                it_timeConf->second[3*i+1],
+                                it_timeConf->second[3*i+2]
+                              );
+    }
+    else if(dimension==2){
+      (*it_spheres)->SetPosition( it_timeConf->second[2*i],
+                                  it_timeConf->second[2*i+1],
+                                  zero
+                                );
+    }
+    ++i;
+  }
+  for( it_mesh2D = mesh2D.begin();
+       it_mesh2D!= mesh2D.end();
+       ++it_mesh2D )
+  {
+    it_mesh2D->second.updatePoints( );
+    it_mesh2D->second.updateScalarField( getStep() );
+  }
+
+  for( it_mesh3D = mesh3D.begin();
+       it_mesh3D!= mesh3D.end();
+       ++it_mesh3D )
+  {
+    it_mesh3D->second.updatePoints( );
+    it_mesh3D->second.updateScalarField( getStep() );
+  }
+
+  for( it_meshfree = meshfree.begin();
+       it_meshfree!= meshfree.end();
+       ++it_meshfree )
+  {
+    it_meshfree->second.updatePoints( );
+    it_meshfree->second.updateScalarField( getStep() );
+  }
+
+  for( it_meshfree3D = meshfree3D.begin();
+      it_meshfree3D!= meshfree3D.end();
+      ++it_meshfree3D )
+    {
+      it_meshfree3D->second.updatePoints( );
+      it_meshfree3D->second.updateScalarField( getStep() );
+    }
+  //   theRenderer->GetRenderWindow()->Render();
+
+    double t;
+    std::string tLetter="t=";
+
+    t = it_timeConf->first;
+
+    std::ostringstream timeString;
+    std::string timeAll;
+
+    timeString << t;
+    timeAll = tLetter + timeString.str();
+
+    const char* timeChar;
+    timeChar= timeAll.data();
+
+    timeActor = vtkTextActor::New();
+    timeTextProperty = vtkTextProperty::New();
+    timeTextProperty->SetColor(0,0,0);
+//    timeTextProperty->SetFontFamilyToTimes();
+    timeTextProperty->SetFontSize(16);
+    timeActor->SetInput(timeChar);
+    timeActor->SetTextProperty(timeTextProperty);
+    timeActor->GetPositionCoordinate()->SetCoordinateSystemToNormalizedViewport();
+    timeActor->GetPositionCoordinate()->SetValue(0.05,0.95);
+    timeActor->SetHeight(0.5);
+
+    theRenderer->AddActor( timeActor );
+
+    theRenderer->GetRenderWindow()->Render();
+    theRenderer->RemoveActor(timeActor);
+
+}
+
+void VTKInterface::refreshTable( CompMesh2D* pMesh2D )
+{
+  double min_max[2];
+  table->GetTableRange( min_max );
+  if( min_max[0] == 0. && min_max[1] == 0. ){
+    table->SetTableRange( pMesh2D->getMinScalar(),
+                          pMesh2D->getMaxScalar()
+                        );
+  }
+  else{
+    if( min_max[0] > pMesh2D->getMinScalar() )
+      min_max[0] = pMesh2D->getMinScalar();
+    if( min_max[1] < pMesh2D->getMaxScalar() )
+      min_max[1] = pMesh2D->getMaxScalar();
+  }
+  // Not sure if it's needed.
+  table->SetTableRange( min_max );
+}
+
+void VTKInterface::refreshTable( CompMesh3D* pMesh3D )
+{
+  double min_max[2];
+  table->GetTableRange( min_max );
+  if( min_max[0] == 0. && min_max[1] == 0. ){
+    table->SetTableRange( pMesh3D->getMinScalar(),
+                          pMesh3D->getMaxScalar()
+                        );
+  }
+  else{
+    if( min_max[0] > pMesh3D->getMinScalar() )
+      min_max[0] = pMesh3D->getMinScalar();
+    if( min_max[1] < pMesh3D->getMaxScalar() )
+      min_max[1] = pMesh3D->getMaxScalar();
+  }
+}
+
+void VTKInterface::refreshTable( CompMeshfree* pMeshfree )
+{
+  double min_max[2];
+  table->GetTableRange( min_max );
+  if( min_max[0] == 0. && min_max[1] == 0. ){
+    table->SetTableRange( pMeshfree->getMinScalar(),
+                          pMeshfree->getMaxScalar()
+                        );
+  }
+  else{
+    if( min_max[0] > pMeshfree->getMinScalar() )
+      min_max[0] = pMeshfree->getMinScalar();
+    if( min_max[1] < pMeshfree->getMaxScalar() )
+      min_max[1] = pMeshfree->getMaxScalar();
+  }
+}
+
+void VTKInterface::refreshTable( CompMeshfree3D* pMeshfree )
+{
+  double min_max[2];
+  table->GetTableRange( min_max );
+  if( min_max[0] == 0. && min_max[1] == 0. ){
+    table->SetTableRange( pMeshfree->getMinScalar(),
+                          pMeshfree->getMaxScalar()
+                        );
+  }
+  else{
+    if( min_max[0] > pMeshfree->getMinScalar() )
+      min_max[0] = pMeshfree->getMinScalar();
+    if( min_max[1] < pMeshfree->getMaxScalar() )
+      min_max[1] = pMeshfree->getMaxScalar();
+  }
+}
+
+void VTKInterface::stepRecord( int step )
+{
+  vtkWindowToImageFilter* w2if = vtkWindowToImageFilter::New();
+  w2if->SetInput(theRenderer->GetRenderWindow());
+
+  vtkJPEGWriter* psw = vtkJPEGWriter::New();
+#if VTK_MAJOR_VERSION > 5
+   psw->SetInputData(w2if->GetOutput());
+#else
+   psw->SetInput(w2if->GetOutput());
+#endif
+
+
+  std::ostringstream title;
+  if (step <10 )
+    title << "image00" << step << ".jpg" ;
+  else if (step <100 )
+    title << "image0" << step << ".jpg" ;
+  else
+    title << "image" << step << ".jpg" ;
+  psw->SetFileName(title.str().c_str());
+  psw->Write();
+
+  psw->Delete();
+
+}
+

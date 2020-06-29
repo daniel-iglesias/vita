@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=VITA - VIrtual Thermal Assessments
+Exec=/usr/local/bin/vita
+Icon=icon-vita48
+Type=Application
+Categories=Qt;Utility;

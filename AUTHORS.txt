@@ -1,0 +1,6 @@
+The following authors have contributed to the project:
+
+Daniel Iglesias <d.iglesias.fusion@gmail.com>
+Sergio Esquembri <sesquembri@i2a2.upm.es>
+Lorena Richiusa <lorena.richiusa@ukaea.uk>
+Patrick Bunting <paddybunting@gmail.com>
