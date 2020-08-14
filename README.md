@@ -13,6 +13,9 @@ It is designed for pulse preparation activities, post-pulse checks, and integrit
 
 VITA uses MkniX library for generating and solving the 2D numerical FEM models, and is distributed under the LGPL v2 license (see License section below).
 
+This project has inspired a more complete 3D framework written in Python targeting the complete assessment of tokamak plasma-facing components. You may check out this framework as a collection of repositories here:
+https://github.com/vitaproject
+
 ## Installation
 
 VITA uses the cmake build system for cross-platform compatibility (version 2.8 or greater).
